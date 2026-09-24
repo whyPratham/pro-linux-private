@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+#
+# run - universal compile+run script
+# Usage: ./run.sh <file> [args...]
+#
+# Supports: .py .java .c .cpp .cc .cxx .rs .js .ts .jsx .tsx .go .sh .rb .php .kt .cs
+#
+# Install (optional, so you can just type `run file.cpp`):
+#   chmod +x run.sh
+#   sudo cp run.sh /usr/local/bin/run
+
+# Stop the script immediately if any command fails, if an undefined
+# variable is used, or if a command in a pipe fails — prevents silent
+# / confusing errors later on.
+set -euo pipefail
+
+# --- Step 1: make sure a filename was actually given ---
+if [ $# -lt 1 ]; then
+    echo "Usage: $0 <file> [program args...]"
+    exit 1
+fi
+
+# --- Step 2: grab the filename, keep the rest as args for the program ---
+FILE="$1"      # the file to compile/run, e.g. main.cpp
+shift          # remove it from the argument list
+ARGS=("$@")    # whatever's left gets passed to the compiled/interpreted program
+
+# --- Step 3: make sure the file actually exists ---
+if [ ! -f "$FILE" ]; then
+    echo "Error: file '$FILE' not found"
+    exit 1
+fi
+
+# --- Step 4: split the filename into useful pieces ---
+FILENAME=$(basename -- "$FILE")   # e.g. "main.cpp" (drops any directory path)
+DIR=$(dirname -- "$FILE")         # e.g. "src" (the folder the file lives in)
+NAME="${FILENAME%.*}"             # e.g. "main"  -> used for output binary/class names
+EXT="${FILENAME##*.}"             # e.g. "cpp"   -> used to decide which case to run
+
+# --- Step 5: create a disposable folder for compiled output ---
+# Compiled languages need somewhere to put binaries/.class/.jar files.
+# mktemp -d makes a fresh temp folder, and the "trap" below guarantees
+# it gets deleted the moment the script exits (success, error, or Ctrl+C)
+# so your project folder never fills up with build junk.
+BUILD_DIR=$(mktemp -d)
+trap 'rm -rf "$BUILD_DIR"' EXIT
+
+# --- Step 6: move into the file's own directory ---
+# So relative imports/includes in the source code (e.g. #include "local.h")
+# resolve correctly.
+cd "$DIR"
+
+# --- Small helper: prints the command before running it, for visibility ---
+run_cmd() {
+    echo "-> $*"
+    "$@"
+}
+
+# --- Step 7: the main dispatch — pick a recipe based on the extension ---
+case "$EXT" in
+
+    # Interpreted languages: no compile step, just run directly
+    py)
+        run_cmd python3 "$FILENAME" "${ARGS[@]}"
+        ;;
+
+    js)
+        run_cmd node "$FILENAME" "${ARGS[@]}"
+        ;;
+
+    # TypeScript: prefer ts-node if installed, otherwise fall back to tsx via npx
+    ts)
+        if command -v ts-node &>/dev/null; then
+            run_cmd ts-node "$FILENAME" "${ARGS[@]}"
+        else
+            run_cmd npx --yes tsx "$FILENAME" "${ARGS[@]}"
+        fi
+        ;;
+
+    # JSX: run through Babel with the React preset
+    jsx)
+        run_cmd npx --yes babel-node --presets @babel/preset-react "$FILENAME" -- "${ARGS[@]}"
+        ;;
+
+    # TSX: same idea as .ts, but transpile-only (skip type errors) since
+    # we just want to run it, not fully type-check it
+    tsx)
+        if command -v ts-node &>/dev/null; then
+            run_cmd ts-node --transpile-only "$FILENAME" "${ARGS[@]}"
+        else
+            run_cmd npx --yes tsx "$FILENAME" "${ARGS[@]}"
+        fi
+        ;;
+
+    # Compiled languages below: compile into BUILD_DIR first, then run the result
+
+    java)
+        run_cmd javac -d "$BUILD_DIR" "$FILENAME"        # compile -> .class in BUILD_DIR
+        run_cmd java -cp "$BUILD_DIR" "$NAME" "${ARGS[@]}"  # run the compiled class
+        ;;
+
+    c)
+        OUT="$BUILD_DIR/$NAME"
+        run_cmd gcc -O2 -o "$OUT" "$FILENAME"   # compile -> binary in BUILD_DIR
+        run_cmd "$OUT" "${ARGS[@]}"             # run the binary
+        ;;
+
+    cpp|cc|cxx)
+        OUT="$BUILD_DIR/$NAME"
+        run_cmd g++ -O2 -std=c++17 -o "$OUT" "$FILENAME"
+        run_cmd "$OUT" "${ARGS[@]}"
+        ;;
+
+    rs)
+        OUT="$BUILD_DIR/$NAME"
+        run_cmd rustc -O -o "$OUT" "$FILENAME"
+        run_cmd "$OUT" "${ARGS[@]}"
+        ;;
+
+    # Go has its own built-in "compile and run in one step" command
+    go)
+        run_cmd go run "$FILENAME" "${ARGS[@]}"
+        ;;
+
+    sh)
+        run_cmd bash "$FILENAME" "${ARGS[@]}"
+        ;;
+
+    rb)
+        run_cmd ruby "$FILENAME" "${ARGS[@]}"
+        ;;
+
+    php)
+        run_cmd php "$FILENAME" "${ARGS[@]}"
+        ;;
+
+    kt)
+        JAR="$BUILD_DIR/$NAME.jar"
+        run_cmd kotlinc "$FILENAME" -include-runtime -d "$JAR"  # compile -> runnable jar
+        run_cmd java -jar "$JAR" "${ARGS[@]}"
+        ;;
+
+    cs)
+        OUT="$BUILD_DIR/$NAME.exe"
+        # try mcs (Mono's compiler) first, fall back to csc if unavailable
+        run_cmd mcs -out:"$OUT" "$FILENAME" 2>/dev/null || run_cmd csc -out:"$OUT" "$FILENAME"
+        run_cmd mono "$OUT" "${ARGS[@]}"
+        ;;
+
+    # Anything not listed above: tell the user and stop
+    *)
+        echo "Error: unsupported extension '.$EXT'"
+        exit 1
+        ;;
+esac
+
+# When this script exits (whichever branch above ran), the "trap" set
+# earlier automatically deletes BUILD_DIR — no manual cleanup needed.
