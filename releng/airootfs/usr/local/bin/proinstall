@@ -1,0 +1,4 @@
+#!/bin/bash
+# PRO Linux — convenience installer command
+# Usage: proinstall
+bash /root/install.sh
